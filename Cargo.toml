@@ -1,0 +1,15 @@
+[package]
+name = "looking-glass"
+version = "0.1.0"
+authors = ["Izzy Swart <zenerboson@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+futures = { version = "0.3.5" }
+protocol = { git = "https://github.com/noocene/protocol" }
+thiserror = { git = "https://github.com/noocene/thiserror", default-features = false }
+core-error = { git = "https://github.com/core-error/core-error", default-features = false }
+serde = { version = "1.0.111", features = ["derive"] }
+downcast-rs = "1.1.1"
+erasure-traits = { git = "https://github.com/noocene/erasure-traits" }
+protocol-mve-transport = { git = "https://github.com/noocene/protocol-mve-transport", features = ["vessels"] }
