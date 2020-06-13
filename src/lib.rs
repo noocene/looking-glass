@@ -11,8 +11,10 @@ use futures::{
     FutureExt, Sink, SinkExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
 };
 use protocol::{
-    future::MapOk, protocol, CloneContext, Coalesce, ContextReference, Contextualize, Dispatch,
-    Fork, Future, Join, Read, ReferenceContext, Unravel, Write,
+    allocated::ProtocolError,
+    future::{ok, Ready as PReady},
+    protocol, CloneContext, Coalesce, ContextReference, Contextualize, Dispatch, Fork, Future,
+    Join, Read, ReferenceContext, Unravel, Write,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,6 +35,23 @@ use thiserror::Error;
 pub struct Id([u8; 32]);
 
 #[protocol]
+#[derive(Debug, Error)]
+pub enum ErasedError {
+    #[error("protocol error: {0}")]
+    Protocol(
+        #[source]
+        #[from]
+        ProtocolError,
+    ),
+    #[error("underlying error: {0}")]
+    Erased(
+        #[source]
+        #[from]
+        Box<dyn Error + Send>,
+    ),
+}
+
+#[protocol]
 pub trait Typed {
     type Type: TryFuture<Ok = Item>;
     type Id: TryFuture<Ok = Id>;
@@ -49,7 +68,6 @@ pub trait StaticTyped: Typed {
     fn static_id() -> Self::StaticId;
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Item {
     pub generics: Generics,
@@ -57,41 +75,131 @@ pub struct Item {
     pub ty: Id,
 }
 
-#[protocol]
+pub struct ItemUnravel {
+    state: ItemUnravelState,
+}
+
+enum ItemUnravelState {
+    Write(Option<Item>),
+    Flush,
+    Done,
+}
+
+impl<C: ?Sized + Write<Item> + Unpin> Future<C> for ItemUnravel {
+    type Ok = PReady<(), C::Error>;
+    type Error = C::Error;
+
+    fn poll<R: BorrowMut<C>>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        mut ctx: R,
+    ) -> Poll<Result<Self::Ok, Self::Error>> {
+        let this = &mut *self;
+        let ctx = ctx.borrow_mut();
+
+        loop {
+            match &mut this.state {
+                ItemUnravelState::Write(item) => {
+                    let mut ctx = Pin::new(&mut *ctx);
+                    ready!(ctx.as_mut().poll_ready(cx))?;
+                    ctx.write(item.take().unwrap())?;
+                    this.state = ItemUnravelState::Flush;
+                }
+                ItemUnravelState::Flush => {
+                    ready!(Pin::new(&mut *ctx).poll_ready(cx))?;
+                    this.state = ItemUnravelState::Done;
+                    return Poll::Ready(Ok(ok(())));
+                }
+                ItemUnravelState::Done => panic!("ItemUnravel polled after completion"),
+            }
+        }
+    }
+}
+
+impl<C: ?Sized + Write<Item> + Unpin> Unravel<C> for Item {
+    type Finalize = PReady<(), C::Error>;
+    type Target = ItemUnravel;
+
+    fn unravel(self) -> Self::Target {
+        ItemUnravel {
+            state: ItemUnravelState::Write(Some(self)),
+        }
+    }
+}
+
+enum ItemCoalesceState {
+    Read,
+    Done,
+}
+
+pub struct ItemCoalesce {
+    state: ItemCoalesceState,
+}
+
+impl<C: ?Sized + Read<Item> + Unpin> Future<C> for ItemCoalesce {
+    type Ok = Item;
+    type Error = C::Error;
+
+    fn poll<R: BorrowMut<C>>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        mut ctx: R,
+    ) -> Poll<Result<Self::Ok, Self::Error>> {
+        let this = &mut *self;
+        let ctx = ctx.borrow_mut();
+
+        loop {
+            match &mut this.state {
+                ItemCoalesceState::Read => {
+                    let item = ready!(Pin::new(&mut *ctx).read(cx))?;
+                    this.state = ItemCoalesceState::Done;
+                    return Poll::Ready(Ok(item));
+                }
+                ItemCoalesceState::Done => panic!("ItemUnravel polled after completion"),
+            }
+        }
+    }
+}
+
+impl<C: ?Sized + Read<Item> + Unpin> Coalesce<C> for Item {
+    type Future = ItemCoalesce;
+
+    fn coalesce() -> Self::Future {
+        ItemCoalesce {
+            state: ItemCoalesceState::Read,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum TypePosition {
     Generic(u32),
     Concrete(Id),
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Generics {
     pub base: [u8; 32],
     pub parameters: Vec<(Option<String>, Id)>,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Binding {
     pub name: Option<String>,
     pub ty: TypePosition,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Product {
     pub bindings: Vec<Binding>,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Variant {
     pub name: Option<String>,
     pub ty: Product,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum Receiver {
     Move,
@@ -99,7 +207,6 @@ pub enum Receiver {
     Ref,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Method {
     pub receiver: Receiver,
@@ -107,7 +214,6 @@ pub struct Method {
     pub ret: Option<TypePosition>,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum Capture {
     Once,
@@ -115,7 +221,6 @@ pub enum Capture {
     Ref,
 }
 
-#[protocol]
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum Type {
     Sum(Vec<Variant>),
@@ -140,11 +245,11 @@ pub enum Function {
 
 #[protocol]
 pub enum Reflection {
-    Sum(u32, Vec<Box<dyn Any + Send>>),
-    Product(Vec<Box<dyn Any + Send>>),
-    Function(Function),
+    // Sum(u32, Vec<Box<dyn Any + Send>>),
+    // Product(Vec<Box<dyn Any + Send>>),
+    // Function(Function),
     Opaque,
-    Object(Vec<Function>),
+    // Object(Vec<Function>),
 }
 
 #[protocol]
@@ -157,7 +262,7 @@ pub trait Reflect {
 type ErasedReflect = Box<
     dyn Reflect<
             Reflect = Pin<
-                Box<dyn futures::Future<Output = Result<Reflection, Box<dyn Error + Send>>> + Send>,
+                Box<dyn futures::Future<Output = Result<Reflection, ErasedError>> + Send>,
             >,
         > + Send,
 >;
@@ -183,8 +288,7 @@ where
     T::Reflect: Send,
     <T::Reflect as TryFuture>::Error: Error + Send,
 {
-    type Reflect =
-        Pin<Box<dyn futures::Future<Output = Result<Reflection, Box<dyn Error + Send>>> + Send>>;
+    type Reflect = Pin<Box<dyn futures::Future<Output = Result<Reflection, ErasedError>> + Send>>;
 
     fn reflect(self: Box<Self>) -> Self::Reflect {
         Box::pin(async move {
@@ -192,7 +296,7 @@ where
                 .reflect()
                 .into_future()
                 .await
-                .map_err(|e| Box::new(e) as Box<dyn Error + Send>)
+                .map_err(|e| (Box::new(e) as Box<dyn Error + Send>).into())
         })
     }
 }
@@ -215,8 +319,8 @@ trait ProtocolCast: Downcast {
 impl_downcast!(ProtocolCast);
 
 struct Extraction {
-    stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>>>>,
-    sink: Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>>>>,
+    stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>> + Send>>,
+    sink: Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>> + Send>>,
 }
 
 pub struct ProtocolAny<T> {
@@ -330,7 +434,7 @@ mod clone_spawn {
     }
 }
 
-use clone_spawn::CloneSpawn;
+pub use clone_spawn::CloneSpawn;
 
 #[derive(Clone)]
 struct CloneSpawnWrapper<T: Clone + Spawn> {
@@ -668,7 +772,7 @@ struct RemoteWrapper<C> {
     context: C,
 }
 
-impl<C: Unpin + Write<bool> + Write<Vec<u8>> + Read<Vec<u8>> + 'static> futures::Future
+impl<C: Send + Unpin + Write<bool> + Write<Vec<u8>> + Read<Vec<u8>> + 'static> futures::Future
     for RemoteWrapperExtract<C>
 where
     <C as Write<bool>>::Error: Send + Error + 'static,
@@ -803,9 +907,9 @@ enum FinalizeProtocolAnyState<C: ?Sized> {
         Option<UnboundedReceiver<futures::future::FutureObj<'static, ()>>>,
     ),
     ExtractTransfer(
-        Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>>>>,
+        Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>> + Send>>,
         Transfer,
-        Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>>>>,
+        Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>> + Send>>,
         Transfer,
         Option<UnboundedReceiver<futures::future::FutureObj<'static, ()>>>,
     ),
