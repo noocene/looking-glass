@@ -5,6 +5,7 @@ use futures::{
     channel::mpsc::unbounded,
     channel::mpsc::{UnboundedReceiver, UnboundedSender},
     executor::{block_on, ThreadPool},
+    future::pending,
     stream::Map,
     task::Spawn,
     task::SpawnExt,
