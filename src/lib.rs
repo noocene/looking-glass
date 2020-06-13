@@ -25,9 +25,24 @@ use std::{
 };
 use thiserror::Error;
 
+pub use derive::typed;
+#[doc(hidden)]
+pub use highway;
+
 #[protocol]
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Id([u8; 32]);
+pub struct Id([u64; 4]);
+
+impl Id {
+    #[doc(hidden)]
+    pub fn hidden_new_do_not_call_manually(item: [u64; 4]) -> Self {
+        Id(item)
+    }
+    #[doc(hidden)]
+    pub fn hidden_extract_do_not_call_manually(self) -> [u64; 4] {
+        self.0
+    }
+}
 
 #[protocol]
 #[derive(Debug, Error)]
@@ -47,9 +62,7 @@ pub enum ErasedError {
 }
 
 pub trait Typed {
-    type Type: TryFuture<Ok = Id>;
-
-    fn ty() -> Self::Type;
+    fn ty() -> Id;
 }
 
 trait ProtocolCast: Downcast {
@@ -79,20 +92,18 @@ impl<T> Debug for ProtocolAny<T> {
 }
 
 #[derive(Debug, Error)]
-#[bounds(where T: Error + 'static, U: Error + 'static)]
-pub enum DowncastError<T, U> {
+#[bounds(where T: Error + 'static)]
+pub enum DowncastError<T> {
     #[error("incorrect type")]
     TypeMismatch,
-    #[error("failed to acquire type parameter id: {0}")]
-    StaticTyped(#[source] T),
     #[error("failed to extract erased transport: {0}")]
     Extract(#[source] Box<dyn Error + Send>),
     #[error("coalesce error: {0}")]
-    Coalesce(#[source] U),
+    Coalesce(#[source] T),
 }
 
-impl<T, V, U> From<DowncastError<T, V>> for (DowncastError<T, V>, Option<U>) {
-    fn from(error: DowncastError<T, V>) -> Self {
+impl<T, U> From<DowncastError<T>> for (DowncastError<T>, Option<U>) {
+    fn from(error: DowncastError<T>) -> Self {
         (error, None)
     }
 }
@@ -104,7 +115,7 @@ impl<T> ProtocolAny<T> {
     ) -> Result<
         U,
         (
-            DowncastError<<U::Type as TryFuture>::Error, <T::Coalesce as TryFuture>::Error>,
+            DowncastError<<T::Coalesce as TryFuture>::Error>,
             Option<Self>,
         ),
     >
@@ -124,26 +135,22 @@ impl<T> ProtocolAny<T> {
                 .unwrap()
                 .data);
         } else {
-            match U::ty().into_future().await {
-                Ok(ty) => {
-                    if ty != self.ty {
-                        Err((DowncastError::TypeMismatch, Some(self)))
-                    } else {
-                        let Extraction { stream, sink } = self
-                            .inner
-                            .extract(Box::new(CloneSpawnWrapper {
-                                inner: spawner.clone(),
-                            }))
-                            .into_future()
-                            .await
-                            .map_err(DowncastError::Extract)?;
-                        Ok(T::coalesce(stream, sink, spawner)
-                            .into_future()
-                            .await
-                            .map_err(DowncastError::Coalesce)?)
-                    }
-                }
-                Err(e) => Err((DowncastError::StaticTyped(e), Some(self))),
+            let ty = U::ty();
+            if ty != self.ty {
+                Err((DowncastError::TypeMismatch, Some(self)))
+            } else {
+                let Extraction { stream, sink } = self
+                    .inner
+                    .extract(Box::new(CloneSpawnWrapper {
+                        inner: spawner.clone(),
+                    }))
+                    .into_future()
+                    .await
+                    .map_err(DowncastError::Extract)?;
+                Ok(T::coalesce(stream, sink, spawner)
+                    .into_future()
+                    .await
+                    .map_err(DowncastError::Coalesce)?)
             }
         }
     }
@@ -166,7 +173,7 @@ mod clone_spawn {
     }
 }
 
-pub use clone_spawn::CloneSpawn;
+use clone_spawn::CloneSpawn;
 
 #[derive(Clone)]
 struct CloneSpawnWrapper<T: Clone + Spawn> {
@@ -198,8 +205,6 @@ impl Clone for Box<dyn CloneSpawn> {
 
 impl<T: 'static + Typed + Send, U: 'static> ProtocolCast for LocalWrapper<T, U>
 where
-    <T::Type as TryFuture>::Error: Error + Send,
-    T::Type: Send,
     U: Send
         + FramedTransportUnravel<
             T,
@@ -237,9 +242,7 @@ where
 }
 
 pub trait Erase<T>: Typed {
-    type Erase: TryFuture<Ok = ProtocolAny<T>>;
-
-    fn erase(self) -> Self::Erase;
+    fn erase(self) -> ProtocolAny<T>;
 }
 
 impl<
@@ -256,30 +259,19 @@ impl<
             + 'static,
     > Erase<U> for T
 where
-    <T::Type as TryFuture>::Error: Error + Send,
-    T::Type: Send,
     U::Unravel: Send,
 {
-    type Erase = Pin<
-        Box<
-            dyn futures::Future<Output = Result<ProtocolAny<U>, <T::Type as TryFuture>::Error>>
-                + Send,
-        >,
-    >;
+    fn erase(self) -> ProtocolAny<U> {
+        let id = Self::ty();
 
-    fn erase(self) -> Self::Erase {
-        let id = Self::ty().into_future();
-
-        Box::pin(async move {
-            Ok(ProtocolAny {
-                ty: id.await?,
+        ProtocolAny {
+            ty: id,
+            marker: PhantomData,
+            inner: Box::new(LocalWrapper::<_, U> {
+                data: self,
                 marker: PhantomData,
-                inner: Box::new(LocalWrapper::<_, U> {
-                    data: self,
-                    marker: PhantomData,
-                }),
-            })
-        })
+            }),
+        }
     }
 }
 
@@ -541,7 +533,7 @@ where
 {
     fn extract(
         mut self: Box<Self>,
-        spawner: Box<dyn CloneSpawn>,
+        _: Box<dyn CloneSpawn>,
     ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, Box<dyn Error + Send>>> + Send>>
     {
         Box::pin(RemoteWrapperExtract {
@@ -899,7 +891,7 @@ where
                         .map_err(ProtocolAnyUnravelError::Contextualize)?;
                     this.state = ForkProtocolAnyState::Write(handle, context);
                 }
-                ForkProtocolAnyState::Write(handle, context) => {
+                ForkProtocolAnyState::Write(_, _) => {
                     let mut ctx = Pin::new(&mut *ctx);
                     ready!(ctx.as_mut().poll_ready(cx)).map_err(ProtocolAnyUnravelError::Write)?;
                     if let ForkProtocolAnyState::Write(handle, context) =
@@ -912,7 +904,7 @@ where
                         panic!("invalid state")
                     }
                 }
-                ForkProtocolAnyState::Flush(context) => {
+                ForkProtocolAnyState::Flush(_) => {
                     ready!(Pin::new(&mut *ctx).poll_ready(cx))
                         .map_err(ProtocolAnyUnravelError::Write)?;
                     if let ForkProtocolAnyState::Flush(context) =

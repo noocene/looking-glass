@@ -1,0 +1,15 @@
+[package]
+name = "derive"
+version = "0.1.0"
+authors = ["Izzy Swart <zenerboson@gmail.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.7"
+syn = "1.0.31"
+synstructure = "0.12.4"
+proc-macro2 = "1.0.18"
+highway = "0.4.0"

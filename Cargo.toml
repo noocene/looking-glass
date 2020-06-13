@@ -13,3 +13,8 @@ serde = { version = "1.0.111", features = ["derive"] }
 downcast-rs = "1.1.1"
 erasure-traits = { git = "https://github.com/noocene/erasure-traits" }
 protocol-mve-transport = { git = "https://github.com/noocene/protocol-mve-transport", features = ["vessels"] }
+highway = "0.4.0"
+derive = { path = "./derive" }
+
+[workspace]
+members = ["./derive"]
