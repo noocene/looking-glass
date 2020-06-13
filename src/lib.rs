@@ -3,25 +3,20 @@ use downcast_rs::{impl_downcast, Downcast};
 use erasure_traits::{FramedTransportCoalesce, FramedTransportUnravel};
 use futures::{
     channel::mpsc::{channel, unbounded, UnboundedReceiver, UnboundedSender},
-    future::{ready, Ready},
     ready,
     stream::FuturesUnordered,
     stream::Map,
     task::{Spawn, SpawnExt},
-    FutureExt, Sink, SinkExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStream, TryStreamExt,
+    FutureExt, Sink, SinkExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStreamExt,
 };
 use protocol::{
-    allocated::ProtocolError,
-    future::{ok, Ready as PReady},
-    protocol, CloneContext, Coalesce, ContextReference, Contextualize, Dispatch, FinalizeImmediate,
-    Fork, Future, Join, Read, ReferenceContext, Unravel, Write,
+    allocated::ProtocolError, protocol, CloneContext, Coalesce, ContextReference, Contextualize,
+    FinalizeImmediate, Future, Read, ReferenceContext, Unravel, Write,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
     any::TypeId,
     borrow::BorrowMut,
-    convert::Infallible,
     fmt::Debug,
     marker::PhantomData,
     mem::replace,
@@ -51,265 +46,13 @@ pub enum ErasedError {
     ),
 }
 
-#[protocol]
 pub trait Typed {
-    type Type: TryFuture<Ok = Item>;
-    type Id: TryFuture<Ok = Id>;
+    type Type: TryFuture<Ok = Id>;
 
-    fn ty(&self) -> Self::Type;
-    fn id(&self) -> Self::Id;
-}
-
-pub trait StaticTyped: Typed {
-    type StaticType: TryFuture<Ok = Item>;
-    type StaticId: TryFuture<Ok = Id>;
-
-    fn static_ty() -> Self::StaticType;
-    fn static_id() -> Self::StaticId;
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Item {
-    pub generics: Generics,
-    pub content: Type,
-    pub ty: Id,
-}
-
-pub struct ItemUnravel {
-    state: ItemUnravelState,
-}
-
-enum ItemUnravelState {
-    Write(Option<Item>),
-    Flush,
-    Done,
-}
-
-impl<C: ?Sized + Write<Item> + Unpin> Future<C> for ItemUnravel {
-    type Ok = PReady<(), C::Error>;
-    type Error = C::Error;
-
-    fn poll<R: BorrowMut<C>>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-        mut ctx: R,
-    ) -> Poll<Result<Self::Ok, Self::Error>> {
-        let this = &mut *self;
-        let ctx = ctx.borrow_mut();
-
-        loop {
-            match &mut this.state {
-                ItemUnravelState::Write(item) => {
-                    let mut ctx = Pin::new(&mut *ctx);
-                    ready!(ctx.as_mut().poll_ready(cx))?;
-                    ctx.write(item.take().unwrap())?;
-                    this.state = ItemUnravelState::Flush;
-                }
-                ItemUnravelState::Flush => {
-                    ready!(Pin::new(&mut *ctx).poll_ready(cx))?;
-                    this.state = ItemUnravelState::Done;
-                    return Poll::Ready(Ok(ok(())));
-                }
-                ItemUnravelState::Done => panic!("ItemUnravel polled after completion"),
-            }
-        }
-    }
-}
-
-impl<C: ?Sized + Write<Item> + Unpin> Unravel<C> for Item {
-    type Finalize = PReady<(), C::Error>;
-    type Target = ItemUnravel;
-
-    fn unravel(self) -> Self::Target {
-        ItemUnravel {
-            state: ItemUnravelState::Write(Some(self)),
-        }
-    }
-}
-
-enum ItemCoalesceState {
-    Read,
-    Done,
-}
-
-pub struct ItemCoalesce {
-    state: ItemCoalesceState,
-}
-
-impl<C: ?Sized + Read<Item> + Unpin> Future<C> for ItemCoalesce {
-    type Ok = Item;
-    type Error = C::Error;
-
-    fn poll<R: BorrowMut<C>>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-        mut ctx: R,
-    ) -> Poll<Result<Self::Ok, Self::Error>> {
-        let this = &mut *self;
-        let ctx = ctx.borrow_mut();
-
-        loop {
-            match &mut this.state {
-                ItemCoalesceState::Read => {
-                    let item = ready!(Pin::new(&mut *ctx).read(cx))?;
-                    this.state = ItemCoalesceState::Done;
-                    return Poll::Ready(Ok(item));
-                }
-                ItemCoalesceState::Done => panic!("ItemUnravel polled after completion"),
-            }
-        }
-    }
-}
-
-impl<C: ?Sized + Read<Item> + Unpin> Coalesce<C> for Item {
-    type Future = ItemCoalesce;
-
-    fn coalesce() -> Self::Future {
-        ItemCoalesce {
-            state: ItemCoalesceState::Read,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub enum TypePosition {
-    Generic(u32),
-    Concrete(Id),
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Generics {
-    pub base: [u8; 32],
-    pub parameters: Vec<(Option<String>, Id)>,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Binding {
-    pub name: Option<String>,
-    pub ty: TypePosition,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Product {
-    pub bindings: Vec<Binding>,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Variant {
-    pub name: Option<String>,
-    pub ty: Product,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub enum Receiver {
-    Move,
-    Mut,
-    Ref,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct Method {
-    pub receiver: Receiver,
-    pub arguments: Vec<TypePosition>,
-    pub ret: Option<TypePosition>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub enum Capture {
-    Once,
-    Mut,
-    Ref,
-}
-
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub enum Type {
-    Sum(Vec<Variant>),
-    Product(Product),
-    Opaque,
-    Function {
-        capture: Capture,
-        arguments: Vec<TypePosition>,
-        ret: Option<TypePosition>,
-    },
-    Object {
-        methods: Vec<Method>,
-    },
-}
-
-#[protocol]
-pub enum Function {
-    FnOnce(Box<dyn FnOnce(Vec<Box<dyn Any + Send>>) -> Box<dyn Any + Send> + Send>),
-    FnMut(Box<dyn FnOnce(Vec<Box<dyn Any + Send>>) -> Box<dyn Any + Send> + Send>),
-    Fn(Box<dyn FnOnce(Vec<Box<dyn Any + Send>>) -> Box<dyn Any + Send> + Send>),
-}
-
-#[protocol]
-pub enum Reflection {
-    // Sum(u32, Vec<Box<dyn Any + Send>>),
-    // Product(Vec<Box<dyn Any + Send>>),
-    // Function(Function),
-    Opaque,
-    // Object(Vec<Function>),
-}
-
-#[protocol]
-pub trait Reflect {
-    type Reflect: TryFuture<Ok = Reflection>;
-
-    fn reflect(self: Box<Self>) -> Self::Reflect;
-}
-
-type ErasedReflect = Box<
-    dyn Reflect<
-            Reflect = Pin<
-                Box<dyn futures::Future<Output = Result<Reflection, ErasedError>> + Send>,
-            >,
-        > + Send,
->;
-
-struct ReflectEraser<T: Reflect> {
-    inner: Box<T>,
-}
-
-impl<T: Reflect + Send + 'static> ReflectEraser<T>
-where
-    T::Reflect: Send,
-    <T::Reflect as TryFuture>::Error: Error + Send,
-{
-    fn erase(item: T) -> ErasedReflect {
-        Box::new(Self {
-            inner: Box::new(item),
-        })
-    }
-}
-
-impl<T: Reflect + Send + 'static> Reflect for ReflectEraser<T>
-where
-    T::Reflect: Send,
-    <T::Reflect as TryFuture>::Error: Error + Send,
-{
-    type Reflect = Pin<Box<dyn futures::Future<Output = Result<Reflection, ErasedError>> + Send>>;
-
-    fn reflect(self: Box<Self>) -> Self::Reflect {
-        Box::pin(async move {
-            self.inner
-                .reflect()
-                .into_future()
-                .await
-                .map_err(|e| (Box::new(e) as Box<dyn Error + Send>).into())
-        })
-    }
+    fn ty() -> Self::Type;
 }
 
 trait ProtocolCast: Downcast {
-    fn reflect(
-        self: Box<Self>,
-    ) -> Pin<
-        Box<
-            dyn futures::Future<Output = Result<(Item, ErasedReflect), Box<dyn Error + Send>>>
-                + Send,
-        >,
-    >;
     fn extract(
         self: Box<Self>,
         spawner: Box<dyn CloneSpawn>,
@@ -355,13 +98,13 @@ impl<T, V, U> From<DowncastError<T, V>> for (DowncastError<T, V>, Option<U>) {
 }
 
 impl<T> ProtocolAny<T> {
-    pub async fn downcast<U: StaticTyped + 'static, S: Clone + Spawn + Send + 'static>(
+    pub async fn downcast<U: Typed + 'static, S: Clone + Spawn + Send + 'static>(
         self,
         spawner: S,
     ) -> Result<
         U,
         (
-            DowncastError<<U::StaticId as TryFuture>::Error, <T::Coalesce as TryFuture>::Error>,
+            DowncastError<<U::Type as TryFuture>::Error, <T::Coalesce as TryFuture>::Error>,
             Option<Self>,
         ),
     >
@@ -381,7 +124,7 @@ impl<T> ProtocolAny<T> {
                 .unwrap()
                 .data);
         } else {
-            match U::static_id().into_future().await {
+            match U::ty().into_future().await {
                 Ok(ty) => {
                     if ty != self.ty {
                         Err((DowncastError::TypeMismatch, Some(self)))
@@ -403,17 +146,6 @@ impl<T> ProtocolAny<T> {
                 Err(e) => Err((DowncastError::StaticTyped(e), Some(self))),
             }
         }
-    }
-
-    pub fn reflect(
-        self,
-    ) -> Pin<
-        Box<
-            dyn futures::Future<Output = Result<(Item, ErasedReflect), Box<dyn Error + Send>>>
-                + Send,
-        >,
-    > {
-        self.inner.reflect()
     }
 
     pub fn ty(&self) -> Id {
@@ -464,12 +196,10 @@ impl Clone for Box<dyn CloneSpawn> {
     }
 }
 
-impl<T: 'static + Typed + Reflect + Send, U: 'static> ProtocolCast for LocalWrapper<T, U>
+impl<T: 'static + Typed + Send, U: 'static> ProtocolCast for LocalWrapper<T, U>
 where
     <T::Type as TryFuture>::Error: Error + Send,
     T::Type: Send,
-    T::Reflect: Send,
-    <T::Reflect as TryFuture>::Error: Error + Send,
     U: Send
         + FramedTransportUnravel<
             T,
@@ -482,25 +212,6 @@ where
         >,
     U::Unravel: Send,
 {
-    fn reflect(
-        self: Box<Self>,
-    ) -> Pin<
-        Box<
-            dyn futures::Future<Output = Result<(Item, ErasedReflect), Box<dyn Error + Send>>>
-                + Send,
-        >,
-    > {
-        let ty = self.data.ty().into_future();
-        let reflect = ReflectEraser::erase(self.data);
-
-        Box::pin(async move {
-            Ok((
-                ty.await.map_err(|e| Box::new(e) as Box<dyn Error + Send>)?,
-                reflect,
-            ))
-        })
-    }
-
     fn extract(
         self: Box<Self>,
         spawner: Box<dyn CloneSpawn>,
@@ -525,14 +236,14 @@ where
     }
 }
 
-pub trait Erase<T>: Reflect + Typed {
+pub trait Erase<T>: Typed {
     type Erase: TryFuture<Ok = ProtocolAny<T>>;
 
     fn erase(self) -> Self::Erase;
 }
 
 impl<
-        T: Reflect + Typed + Send + 'static,
+        T: Typed + Send + 'static,
         U: FramedTransportUnravel<
                 T,
                 Map<
@@ -545,22 +256,19 @@ impl<
             + 'static,
     > Erase<U> for T
 where
-    T::Id: Send,
     <T::Type as TryFuture>::Error: Error + Send,
     T::Type: Send,
-    T::Reflect: Send,
-    <T::Reflect as TryFuture>::Error: Error + Send,
     U::Unravel: Send,
 {
     type Erase = Pin<
         Box<
-            dyn futures::Future<Output = Result<ProtocolAny<U>, <T::Id as TryFuture>::Error>>
+            dyn futures::Future<Output = Result<ProtocolAny<U>, <T::Type as TryFuture>::Error>>
                 + Send,
         >,
     >;
 
     fn erase(self) -> Self::Erase {
-        let id = self.id().into_future();
+        let id = Self::ty().into_future();
 
         Box::pin(async move {
             Ok(ProtocolAny {
@@ -601,7 +309,6 @@ mod join_protocol_any {
 
     #[derive(Serialize, Deserialize, PartialEq)]
     pub enum ProtocolAnyArgument {
-        Reflect,
         Extract,
         Drop,
     }
@@ -628,22 +335,15 @@ where
     C: Unpin,
     C::JoinOutput: Unpin,
     C::Context: FinalizeImmediate<RemoteWrapperFinalize>
-        + Join<(Item, ErasedReflect)>
         + Write<ProtocolAnyArgument>
         + Write<Vec<u8>>
         + Read<Vec<u8>>
         + Send
         + 'static
-        + Unpin
-        + Read<<C::Context as Dispatch<(Item, ErasedReflect)>>::Handle>,
+        + Unpin,
     <C::Context as Write<ProtocolAnyArgument>>::Error: Send + Error + 'static,
     <C::Context as Write<Vec<u8>>>::Error: Send + Error + 'static,
     <C::Context as Read<Vec<u8>>>::Error: Send + Error + 'static,
-    <C::Context as Read<<C::Context as Dispatch<(Item, ErasedReflect)>>::Handle>>::Error:
-        Send + Error + 'static,
-    <C::Context as Join<(Item, ErasedReflect)>>::Future: Unpin + Send,
-    <<C::Context as Join<(Item, ErasedReflect)>>::Future as Future<C::Context>>::Error:
-        Send + Error + 'static,
     RemoteWrapperFinalize: Future<<C::Context as FinalizeImmediate<RemoteWrapperFinalize>>::Target>,
 {
     type Ok = ProtocolAny<T>;
@@ -687,67 +387,6 @@ where
 impl<T, C: ?Sized + Read<(Id, <C as Contextualize>::Handle)> + CloneContext> JoinProtocolAny<T, C> {
     pub fn new() -> Self {
         JoinProtocolAny::Read(PhantomData)
-    }
-}
-
-enum RemoteWrapperReflectState<C: Join<(Item, ErasedReflect)>> {
-    Write,
-    Flush,
-    Read,
-    Join(C::Future),
-}
-
-struct RemoteWrapperReflect<C: Join<(Item, ErasedReflect)>> {
-    context: C,
-    state: RemoteWrapperReflectState<C>,
-}
-
-impl<
-        C: Write<ProtocolAnyArgument>
-            + Read<<C as Dispatch<(Item, ErasedReflect)>>::Handle>
-            + Unpin
-            + Join<(Item, ErasedReflect)>,
-    > futures::Future for RemoteWrapperReflect<C>
-where
-    <C as Write<ProtocolAnyArgument>>::Error: Send + Error + 'static,
-    C::Future: Unpin,
-    <C::Future as Future<C>>::Error: Send + Error + 'static,
-    <C as Read<<C as Dispatch<(Item, ErasedReflect)>>::Handle>>::Error: Send + Error + 'static,
-{
-    type Output = Result<(Item, ErasedReflect), Box<dyn Error + Send>>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let this = &mut *self;
-        loop {
-            match &mut this.state {
-                RemoteWrapperReflectState::Write => {
-                    let mut context = Pin::new(&mut this.context);
-                    ready!(Write::<ProtocolAnyArgument>::poll_ready(
-                        context.as_mut(),
-                        cx
-                    ))
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                    context
-                        .write(ProtocolAnyArgument::Reflect)
-                        .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                    this.state = RemoteWrapperReflectState::Flush;
-                }
-                RemoteWrapperReflectState::Flush => {
-                    ready!(Pin::new(&mut this.context).poll_flush(cx))
-                        .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                    this.state = RemoteWrapperReflectState::Read;
-                }
-                RemoteWrapperReflectState::Read => {
-                    ready!(Pin::new(&mut this.context).read(cx))
-                        .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                }
-                RemoteWrapperReflectState::Join(fut) => {
-                    return Pin::new(fut)
-                        .poll(cx, &mut this.context)
-                        .map_err(|e| Box::new(e) as Box<dyn Error + Send>);
-                }
-            }
-        }
     }
 }
 
@@ -889,35 +528,17 @@ impl<
         C: Write<ProtocolAnyArgument>
             + Write<Vec<u8>>
             + Read<Vec<u8>>
-            + Join<(Item, ErasedReflect)>
             + Unpin
             + Send
-            + Read<<C as Dispatch<(Item, ErasedReflect)>>::Handle>
             + 'static
             + FinalizeImmediate<RemoteWrapperFinalize>,
     > ProtocolCast for RemoteWrapper<C>
 where
     <C as Write<ProtocolAnyArgument>>::Error: Send + Error + 'static,
     <C as Write<Vec<u8>>>::Error: Send + Error + 'static,
-    <C as Read<<C as Dispatch<(Item, ErasedReflect)>>::Handle>>::Error: Send + Error + 'static,
     <C as Read<Vec<u8>>>::Error: Send + Error + 'static,
-    <C as Join<(Item, ErasedReflect)>>::Future: Unpin + Send,
     RemoteWrapperFinalize: Future<<C as FinalizeImmediate<RemoteWrapperFinalize>>::Target>,
-    <C::Future as Future<C>>::Error: Send + Error + 'static,
 {
-    fn reflect(
-        mut self: Box<Self>,
-    ) -> Pin<
-        Box<
-            dyn futures::Future<Output = Result<(Item, ErasedReflect), Box<dyn Error + Send>>>
-                + Send,
-        >,
-    > {
-        Box::pin(RemoteWrapperReflect {
-            context: self.context.take().unwrap(),
-            state: RemoteWrapperReflectState::Write,
-        })
-    }
     fn extract(
         mut self: Box<Self>,
         spawner: Box<dyn CloneSpawn>,
@@ -934,9 +555,7 @@ impl<T, C: ?Sized + Read<(Id, <C as Contextualize>::Handle)> + CloneContext + Un
     for ProtocolAny<T>
 where
     C::JoinOutput: Unpin,
-    C::Context: Join<(Item, ErasedReflect)>
-        + Write<Vec<u8>>
-        + Read<<C::Context as Dispatch<(Item, ErasedReflect)>>::Handle>
+    C::Context: Write<Vec<u8>>
         + Read<Vec<u8>>
         + Write<ProtocolAnyArgument>
         + Send
@@ -946,11 +565,6 @@ where
     <C::Context as Write<ProtocolAnyArgument>>::Error: Send + Error + 'static,
     <C::Context as Write<Vec<u8>>>::Error: Send + Error + 'static,
     <C::Context as Read<Vec<u8>>>::Error: Send + Error + 'static,
-    <C::Context as Read<<C::Context as Dispatch<(Item, ErasedReflect)>>::Handle>>::Error:
-        Send + Error + 'static,
-    <C::Context as Join<(Item, ErasedReflect)>>::Future: Unpin + Send,
-    <<C::Context as Join<(Item, ErasedReflect)>>::Future as Future<C::Context>>::Error:
-        Send + Error + 'static,
     RemoteWrapperFinalize: Future<<C::Context as FinalizeImmediate<RemoteWrapperFinalize>>::Target>,
 {
     type Future = JoinProtocolAny<T, C>;
@@ -1067,14 +681,8 @@ type ProtocolAnyError<C> = ProtocolAnyUnravelError<
 impl<T, C: ?Sized + Write<(Id, <C as Contextualize>::Handle)> + ReferenceContext + Unpin> Future<C>
     for FinalizeProtocolAny<C, T>
 where
-    <C::Context as ContextReference<C>>::Target: Fork<(Item, ErasedReflect)>
-        + Write<Vec<u8>>
-        + Write<<<C::Context as ContextReference<C>>::Target as Dispatch<(Item, ErasedReflect)>>::Handle>
-        + Read<Vec<u8>>
-        + Read<ProtocolAnyArgument>
-        + Send
-        + Unpin
-        + 'static,
+    <C::Context as ContextReference<C>>::Target:
+        Write<Vec<u8>> + Read<Vec<u8>> + Read<ProtocolAnyArgument> + Send + Unpin + 'static,
 {
     type Ok = ();
     type Error = ProtocolAnyError<C>;
@@ -1090,23 +698,23 @@ where
         loop {
             match &mut this.state {
                 FinalizeProtocolAnyState::Read => {
-                    match ready!(Read::<ProtocolAnyArgument>::read(Pin::new(&mut *ctx), cx)).map_err(ProtocolAnyUnravelError::Read)? {
+                    match ready!(Read::<ProtocolAnyArgument>::read(Pin::new(&mut *ctx), cx))
+                        .map_err(ProtocolAnyUnravelError::Read)?
+                    {
                         ProtocolAnyArgument::Extract => {
                             let (sender, receiver) = unbounded();
 
-                            this.state = FinalizeProtocolAnyState::Extract(this.data.take().unwrap().inner.extract(
-                                Box::new(CloneSpawnWrapper {
-                                    inner: Spawner {
-                                        sender
-                                    }
-                                })
-                            ), Some(receiver));
+                            this.state = FinalizeProtocolAnyState::Extract(
+                                this.data.take().unwrap().inner.extract(Box::new(
+                                    CloneSpawnWrapper {
+                                        inner: Spawner { sender },
+                                    },
+                                )),
+                                Some(receiver),
+                            );
                         }
                         ProtocolAnyArgument::Drop => {
                             return Poll::Ready(Ok(()));
-                        }
-                        ProtocolAnyArgument::Reflect => {
-                            todo!()
                         }
                     }
                 }
@@ -1123,14 +731,29 @@ where
                         }
                     }
                     let _ = Pin::new(&mut this.futures).poll_next(cx);
-                    let extraction = ready!(fut.as_mut().poll(cx)).map_err(ProtocolAnyUnravelError::Extract)?;
-                    if let FinalizeProtocolAnyState::Extract(_, receiver) = replace(&mut this.state, FinalizeProtocolAnyState::Done(PhantomData)) {
-                        this.state = FinalizeProtocolAnyState::ExtractTransfer(extraction.stream, Transfer::Clear, extraction.sink ,Transfer::Clear, receiver);
+                    let extraction =
+                        ready!(fut.as_mut().poll(cx)).map_err(ProtocolAnyUnravelError::Extract)?;
+                    if let FinalizeProtocolAnyState::Extract(_, receiver) =
+                        replace(&mut this.state, FinalizeProtocolAnyState::Done(PhantomData))
+                    {
+                        this.state = FinalizeProtocolAnyState::ExtractTransfer(
+                            extraction.stream,
+                            Transfer::Clear,
+                            extraction.sink,
+                            Transfer::Clear,
+                            receiver,
+                        );
                     } else {
                         panic!("invalid state")
                     }
                 }
-                FinalizeProtocolAnyState::ExtractTransfer(stream, inbound,sink,outbound, receiver) => {
+                FinalizeProtocolAnyState::ExtractTransfer(
+                    stream,
+                    inbound,
+                    sink,
+                    outbound,
+                    receiver,
+                ) => {
                     if let Some(recv) = receiver {
                         match Pin::new(recv).poll_next(cx) {
                             Poll::Ready(Some(item)) => {
@@ -1150,34 +773,40 @@ where
                         match outbound {
                             Transfer::Write(data) => {
                                 let mut ctx = Pin::new(&mut *ctx);
-                                if let Poll::Pending = Write::<Vec::<u8>>::poll_ready(ctx.as_mut(), cx).map_err(ProtocolAnyUnravelError::WriteData)? {
-                                   break;
+                                if let Poll::Pending =
+                                    Write::<Vec<u8>>::poll_ready(ctx.as_mut(), cx)
+                                        .map_err(ProtocolAnyUnravelError::WriteData)?
+                                {
+                                    break;
                                 }
 
-                                ctx.write(replace(data,Vec::new())).map_err(ProtocolAnyUnravelError::WriteData)?;
+                                ctx.write(replace(data, Vec::new()))
+                                    .map_err(ProtocolAnyUnravelError::WriteData)?;
 
                                 *outbound = Transfer::Flush;
                             }
                             Transfer::Flush => {
-                                if let Poll::Pending = Write::<Vec<u8>>::poll_flush(Pin::new(&mut *ctx), cx) {
+                                if let Poll::Pending =
+                                    Write::<Vec<u8>>::poll_flush(Pin::new(&mut *ctx), cx)
+                                {
                                     break;
                                 }
 
                                 *outbound = Transfer::Clear;
                             }
-                            Transfer::Clear => {
-                                match Pin::new(stream).poll_next(cx) {
-                                    Poll::Ready(None) => {
-                                        *outbound = Transfer::Done;
-                                        outbound_done = true;
-                                    }
-                                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(ProtocolAnyUnravelError::Extract(e))),
-                                    Poll::Ready(Some(Ok(data))) => {
-                                        *outbound = Transfer::Write(data);
-                                    }
-                                    _ => {}
+                            Transfer::Clear => match Pin::new(stream).poll_next(cx) {
+                                Poll::Ready(None) => {
+                                    *outbound = Transfer::Done;
+                                    outbound_done = true;
                                 }
-                            }
+                                Poll::Ready(Some(Err(e))) => {
+                                    return Poll::Ready(Err(ProtocolAnyUnravelError::Extract(e)))
+                                }
+                                Poll::Ready(Some(Ok(data))) => {
+                                    *outbound = Transfer::Write(data);
+                                }
+                                _ => {}
+                            },
                             Transfer::Done => {
                                 outbound_done = true;
                             }
@@ -1188,16 +817,24 @@ where
                     loop {
                         match inbound {
                             Transfer::Write(data) => {
-                                if let Poll::Pending = Pin::new(&mut *sink).poll_ready(cx).map_err(ProtocolAnyUnravelError::Extract)? {
-                                   break;
+                                if let Poll::Pending = Pin::new(&mut *sink)
+                                    .poll_ready(cx)
+                                    .map_err(ProtocolAnyUnravelError::Extract)?
+                                {
+                                    break;
                                 }
 
-                                Pin::new(&mut *sink).start_send(replace(data,Vec::new())).map_err(ProtocolAnyUnravelError::Extract)?;
+                                Pin::new(&mut *sink)
+                                    .start_send(replace(data, Vec::new()))
+                                    .map_err(ProtocolAnyUnravelError::Extract)?;
 
                                 *inbound = Transfer::Flush;
                             }
                             Transfer::Flush => {
-                                if let Poll::Pending = Pin::new(&mut *sink).poll_flush(cx).map_err(ProtocolAnyUnravelError::Extract)? {
+                                if let Poll::Pending = Pin::new(&mut *sink)
+                                    .poll_flush(cx)
+                                    .map_err(ProtocolAnyUnravelError::Extract)?
+                                {
                                     break;
                                 }
 
@@ -1210,7 +847,11 @@ where
                                 }
 
                                 match Pin::new(&mut *ctx).read(cx) {
-                                    Poll::Ready(Err(e)) => return Poll::Ready(Err(ProtocolAnyUnravelError::ReadData(e))),
+                                    Poll::Ready(Err(e)) => {
+                                        return Poll::Ready(Err(ProtocolAnyUnravelError::ReadData(
+                                            e,
+                                        )))
+                                    }
                                     Poll::Ready(Ok(data)) => {
                                         *inbound = Transfer::Write(data);
                                     }
@@ -1221,9 +862,10 @@ where
                         }
                         break;
                     }
-
                 }
-                FinalizeProtocolAnyState::Done(_) => panic!("FinalizeProtocolAny polled after completion") 
+                FinalizeProtocolAnyState::Done(_) => {
+                    panic!("FinalizeProtocolAny polled after completion")
+                }
             }
         }
     }
@@ -1233,14 +875,8 @@ impl<T, C: ?Sized + Write<(Id, <C as Contextualize>::Handle)> + ReferenceContext
     for ForkProtocolAny<C, T>
 where
     C::ForkOutput: Unpin,
-    <C::Context as ContextReference<C>>::Target: Fork<(Item, ErasedReflect)>
-        + Write<Vec<u8>>
-        + Write<<<C::Context as ContextReference<C>>::Target as Dispatch<(Item, ErasedReflect)>>::Handle>
-        + Read<Vec<u8>>
-        + Read<ProtocolAnyArgument>
-        + Send
-        + Unpin
-        + 'static,
+    <C::Context as ContextReference<C>>::Target:
+        Write<Vec<u8>> + Read<Vec<u8>> + Read<ProtocolAnyArgument> + Send + Unpin + 'static,
 {
     type Ok = FinalizeProtocolAny<C, T>;
     type Error = ProtocolAnyError<C>;
@@ -1286,7 +922,7 @@ where
                             context,
                             data: this.data.take(),
                             state: FinalizeProtocolAnyState::Read,
-                            futures: FuturesUnordered::new()
+                            futures: FuturesUnordered::new(),
                         }));
                     } else {
                         panic!("invalid state")
@@ -1301,15 +937,9 @@ where
 impl<T, C: ?Sized + Write<(Id, <C as Contextualize>::Handle)> + ReferenceContext + Unpin> Unravel<C>
     for ProtocolAny<T>
 where
-    <C::Context as ContextReference<C>>::Target: Fork<(Item, ErasedReflect)>
-        + Write<Vec<u8>>
-        + Write<<<C::Context as ContextReference<C>>::Target as Dispatch<(Item, ErasedReflect)>>::Handle>
-        + Read<Vec<u8>>
-        + Read<ProtocolAnyArgument>
-        + Send
-        + Unpin
-        + 'static,
-        C::ForkOutput: Unpin,
+    <C::Context as ContextReference<C>>::Target:
+        Write<Vec<u8>> + Read<Vec<u8>> + Read<ProtocolAnyArgument> + Send + Unpin + 'static,
+    C::ForkOutput: Unpin,
 {
     type Target = ForkProtocolAny<C, T>;
     type Finalize = FinalizeProtocolAny<C, T>;
@@ -1317,46 +947,7 @@ where
     fn unravel(self) -> Self::Target {
         ForkProtocolAny {
             data: Some(self),
-            state: ForkProtocolAnyState::Init
+            state: ForkProtocolAnyState::Init,
         }
-    }
-}
-
-impl Reflect for String {
-    type Reflect = Ready<Result<Reflection, Infallible>>;
-
-    fn reflect(self: Box<Self>) -> Self::Reflect {
-        ready(Ok(Reflection::Opaque))
-    }
-}
-
-impl StaticTyped for String {
-    type StaticType = Ready<Result<Item, Infallible>>;
-    type StaticId = Ready<Result<Id, Infallible>>;
-
-    fn static_ty() -> Self::StaticType {
-        ready(Ok(Item {
-            ty: Id([0u8; 32]),
-            generics: Generics {
-                base: [0u8; 32],
-                parameters: vec![],
-            },
-            content: Type::Opaque,
-        }))
-    }
-    fn static_id() -> Self::StaticId {
-        ready(Ok(Id([0u8; 32])))
-    }
-}
-
-impl Typed for String {
-    type Type = Ready<Result<Item, Infallible>>;
-    type Id = Ready<Result<Id, Infallible>>;
-
-    fn ty(&self) -> Self::Type {
-        String::static_ty()
-    }
-    fn id(&self) -> Self::Id {
-        String::static_id()
     }
 }
