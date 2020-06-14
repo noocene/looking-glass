@@ -25,6 +25,8 @@ use std::{
 };
 use thiserror::Error;
 
+extern crate self as looking_glass;
+
 pub use derive::typed;
 #[doc(hidden)]
 pub use highway;
@@ -942,4 +944,124 @@ where
             state: ForkProtocolAnyState::Init,
         }
     }
+}
+
+derive::type_primitives! {
+    T | { [T; 0000] }, T | { [T; 0001] }, T | { [T; 0002] },
+    T | { [T; 0003] }, T | { [T; 0004] }, T | { [T; 0005] },
+    T | { [T; 0006] }, T | { [T; 0007] }, T | { [T; 0008] },
+    T | { [T; 0009] }, T | { [T; 0010] }, T | { [T; 0011] },
+    T | { [T; 0012] }, T | { [T; 0013] }, T | { [T; 0014] },
+    T | { [T; 0015] }, T | { [T; 0016] }, T | { [T; 0017] },
+    T | { [T; 0018] }, T | { [T; 0019] }, T | { [T; 0020] },
+    T | { [T; 0021] }, T | { [T; 0022] }, T | { [T; 0023] },
+    T | { [T; 0024] }, T | { [T; 0025] }, T | { [T; 0026] },
+    T | { [T; 0027] }, T | { [T; 0028] }, T | { [T; 0029] },
+    T | { [T; 0030] }, T | { [T; 0031] }, T | { [T; 0032] },
+    T | { [T; 0064] }, T | { [T; 0128] }, T | { [T; 0256] },
+    T | { [T; 0512] }, T | { [T; 1024] }, T | { [T; 2048] },
+    T | { [T; 4096] }, T | { [T; 8192] },
+    T | { Option<T> }, T, E | { Result<T, E> },
+    T | { PhantomData<T> },
+    T | { Vec<T> },
+    T | { Pin<Box<dyn futures::Future<Output = T>>> },
+    T | { Pin<Box<dyn futures::Future<Output = T> + Sync>> },
+    T | { Pin<Box<dyn futures::Future<Output = T> + Send>> },
+    T | { Pin<Box<dyn futures::Future<Output = T> + Sync + Send>> },
+    T | { Pin<Box<dyn Stream<Item = T>>> },
+    T | { Pin<Box<dyn Stream<Item = T> + Sync>> },
+    T | { Pin<Box<dyn Stream<Item = T> + Send>> },
+    T | { Pin<Box<dyn Stream<Item = T> + Sync + Send>> },
+    T, E | { Pin<Box<dyn Sink<T, Error = E>>> },
+    T, E | { Pin<Box<dyn Sink<T, Error = E> + Sync>> },
+    T, E | { Pin<Box<dyn Sink<T, Error = E> + Send>> },
+    T, E | { Pin<Box<dyn Sink<T, Error = E> + Sync + Send>> },
+    | { Box<dyn Error> }, | { Box<dyn Error + Sync> },
+    | { Box<dyn Error + Send> }, | { Box<dyn Error + Sync + Send> },
+    | { u8 }, | { u16 }, | { u32 }, | { u64 }, | { u128 }, | { usize },
+    | { i8 }, | { i16 }, | { i32 }, | { i64 }, | { i128 }, | { isize },
+    | { bool }, | { char }, | { f32 }, | { f64 }, | { () },
+    | { String },
+}
+
+macro_rules! fn_impls {
+    (
+        $(($($marker:ident)*) => (
+            $($name:ident)*
+        ))+
+    ) => {
+        derive::type_primitives! {
+            $(
+                Ret $(,$name)* | { Box<dyn Fn($($name,)*) -> Ret $(+ $marker)*> },
+                Ret $(,$name)* | { Box<dyn FnMut($($name,)*) -> Ret $(+ $marker)*> },
+                Ret $(,$name)* | { Box<dyn FnOnce($($name,)*) -> Ret $(+ $marker)*> },
+            )+
+        }
+    };
+}
+
+macro_rules! tuple_impls {
+    (
+        $(
+            ($($name:ident)*)
+        )+
+    ) => {
+        derive::type_primitives! {
+            $(
+                $($name),* | { ($($name,)*) },
+            )+
+        }
+    };
+}
+
+tuple_impls! {
+    (T0)
+    (T0 T1)
+    (T0 T1 T2 T3)
+    (T0 T1 T2 T3 T4)
+    (T0 T1 T2 T3 T4 T5)
+    (T0 T1 T2 T3 T4 T5 T6)
+    (T0 T1 T2 T3 T4 T5 T6 T7)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13 T14)
+    (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13 T14 T15)
+}
+
+macro_rules! marker_variants {
+    ($(
+        $($marker:ident)*
+    ),+) => {
+        $(
+            fn_impls! {
+                ($($marker)*) => ()
+                ($($marker)*) => (T0)
+                ($($marker)*) => (T0 T1)
+                ($($marker)*) => (T0 T1 T2)
+                ($($marker)*) => (T0 T1 T2 T3)
+                ($($marker)*) => (T0 T1 T2 T3 T4)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13 T14)
+                ($($marker)*) => (T0 T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 T12 T13 T14 T15)
+            }
+        )+
+    };
+}
+
+marker_variants! {
+    ,
+    Sync,
+    Send, Sync Send
 }
