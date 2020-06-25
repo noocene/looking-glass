@@ -71,14 +71,14 @@ trait ProtocolCast: Downcast {
     fn extract(
         self: Box<Self>,
         spawner: Box<dyn CloneSpawn>,
-    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, Box<dyn Error + Send>>> + Send>>;
+    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, ErasedError>> + Send>>;
 }
 
 impl_downcast!(ProtocolCast);
 
 struct Extraction {
-    stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>> + Send>>,
-    sink: Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>> + Send>>,
+    stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>> + Send>>,
+    sink: Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError> + Send>>,
 }
 
 pub struct ProtocolAny<T> {
@@ -99,7 +99,7 @@ pub enum DowncastError<T> {
     #[error("incorrect type")]
     TypeMismatch,
     #[error("failed to extract erased transport: {0}")]
-    Extract(#[source] Box<dyn Error + Send>),
+    Extract(#[source] ErasedError),
     #[error("coalesce error: {0}")]
     Coalesce(#[source] T),
 }
@@ -124,8 +124,8 @@ impl<T> ProtocolAny<T> {
     where
         T: FramedTransportCoalesce<
                 U,
-                Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>>>>,
-                Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>>>>,
+                Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
+                Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
                 S,
             > + 'static,
     {
@@ -212,7 +212,7 @@ where
             T,
             Map<
                 futures::channel::mpsc::Receiver<Vec<u8>>,
-                fn(Vec<u8>) -> Result<Vec<u8>, Box<dyn Error + Send>>,
+                fn(Vec<u8>) -> Result<Vec<u8>, ErasedError>,
             >,
             futures::channel::mpsc::Sender<Vec<u8>>,
             Box<dyn CloneSpawn>,
@@ -222,8 +222,7 @@ where
     fn extract(
         self: Box<Self>,
         spawner: Box<dyn CloneSpawn>,
-    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, Box<dyn Error + Send>>> + Send>>
-    {
+    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, ErasedError>> + Send>> {
         let (a_sender, b_receiver) = channel(0);
         let (b_sender, a_receiver) = channel(0);
 
@@ -237,7 +236,7 @@ where
 
             Ok(Extraction {
                 stream: Box::pin(b_receiver.map(Ok)),
-                sink: Box::pin(b_sender.sink_map_err(|e| Box::new(e) as Box<dyn Error + Send>)),
+                sink: Box::pin(b_sender.sink_map_err(|e| ErasedError::Erased(Box::new(e)))),
             })
         })
     }
@@ -253,7 +252,7 @@ impl<
                 T,
                 Map<
                     futures::channel::mpsc::Receiver<Vec<u8>>,
-                    fn(Vec<u8>) -> Result<Vec<u8>, Box<dyn Error + Send>>,
+                    fn(Vec<u8>) -> Result<Vec<u8>, ErasedError>,
                 >,
                 futures::channel::mpsc::Sender<Vec<u8>>,
                 Box<dyn CloneSpawn>,
@@ -480,7 +479,7 @@ where
     <C as Write<Vec<u8>>>::Error: Send + Error + 'static,
     <C as Read<Vec<u8>>>::Error: Send + Error + 'static,
 {
-    type Output = Result<Extraction, Box<dyn Error + Send>>;
+    type Output = Result<Extraction, ErasedError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -509,8 +508,8 @@ where
                     }
                     .split();
                     return Poll::Ready(Ok(Extraction {
-                        stream: Box::pin(stream.map_err(|e| Box::new(e) as Box<dyn Error + Send>)),
-                        sink: Box::pin(sink.sink_map_err(|e| Box::new(e) as Box<dyn Error + Send>)),
+                        stream: Box::pin(stream.map_err(|e| ErasedError::Erased(Box::new(e)))),
+                        sink: Box::pin(sink.sink_map_err(|e| ErasedError::Erased(Box::new(e)))),
                     }));
                 }
             }
@@ -536,8 +535,7 @@ where
     fn extract(
         mut self: Box<Self>,
         _: Box<dyn CloneSpawn>,
-    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, Box<dyn Error + Send>>> + Send>>
-    {
+    ) -> Pin<Box<dyn futures::Future<Output = Result<Extraction, ErasedError>> + Send>> {
         Box::pin(RemoteWrapperExtract {
             context: self.context.take(),
             state: RemoteWrapperExtractState::Write,
@@ -586,13 +584,13 @@ enum Transfer {
 enum FinalizeProtocolAnyState<C: ?Sized> {
     Read,
     Extract(
-        Pin<Box<dyn futures::Future<Output = Result<Extraction, Box<dyn Error + Send>>> + Send>>,
+        Pin<Box<dyn futures::Future<Output = Result<Extraction, ErasedError>> + Send>>,
         Option<UnboundedReceiver<futures::future::FutureObj<'static, ()>>>,
     ),
     ExtractTransfer(
-        Pin<Box<dyn Stream<Item = Result<Vec<u8>, Box<dyn Error + Send>>> + Send>>,
+        Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>> + Send>>,
         Transfer,
-        Pin<Box<dyn Sink<Vec<u8>, Error = Box<dyn Error + Send>> + Send>>,
+        Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError> + Send>>,
         Transfer,
         Option<UnboundedReceiver<futures::future::FutureObj<'static, ()>>>,
     ),
@@ -655,7 +653,7 @@ pub enum ProtocolAnyUnravelError<T, U, V, W, X> {
     #[error("read failed: {0}")]
     Read(#[source] V),
     #[error("extract failed: {0}")]
-    Extract(#[source] Box<dyn Error + Send>),
+    Extract(#[source] ErasedError),
     #[error("extract data write failed: {0}")]
     WriteData(#[source] W),
     #[error("extract data read failed: {0}")]
