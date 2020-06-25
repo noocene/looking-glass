@@ -113,8 +113,8 @@ impl<T, U> From<DowncastError<T>> for (DowncastError<T>, Option<U>) {
 pub trait Eraser<U, S>:
     FramedTransportCoalesce<
     U,
-    Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
-    Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
+    Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>> + Send>>,
+    Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError> + Send>>,
     S,
 >
 {
@@ -123,8 +123,8 @@ pub trait Eraser<U, S>:
 impl<
         T: FramedTransportCoalesce<
             U,
-            Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
-            Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
+            Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>> + Send>>,
+            Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError> + Send>>,
             S,
         >,
         U,
@@ -147,8 +147,8 @@ impl<T> ProtocolAny<T> {
     where
         T: FramedTransportCoalesce<
                 U,
-                Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
-                Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
+                Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>> + Send>>,
+                Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError> + Send>>,
                 S,
             > + 'static,
     {
