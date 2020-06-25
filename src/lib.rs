@@ -110,6 +110,29 @@ impl<T, U> From<DowncastError<T>> for (DowncastError<T>, Option<U>) {
     }
 }
 
+pub trait Eraser<U, S>:
+    FramedTransportCoalesce<
+    U,
+    Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
+    Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
+    S,
+>
+{
+}
+
+impl<
+        T: FramedTransportCoalesce<
+            U,
+            Pin<Box<dyn Stream<Item = Result<Vec<u8>, ErasedError>>>>,
+            Pin<Box<dyn Sink<Vec<u8>, Error = ErasedError>>>,
+            S,
+        >,
+        U,
+        S,
+    > Eraser<U, S> for T
+{
+}
+
 impl<T> ProtocolAny<T> {
     pub async fn downcast<U: Typed + 'static, S: Clone + Spawn + Send + 'static>(
         self,
