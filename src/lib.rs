@@ -9,6 +9,7 @@ use futures::{
     task::{Spawn, SpawnExt},
     FutureExt, Sink, SinkExt, Stream, StreamExt, TryFuture, TryFutureExt, TryStreamExt,
 };
+use proc_macro_hack::proc_macro_hack;
 use protocol::{
     allocated::ProtocolError, protocol, CloneContext, Coalesce, ContextReference, Contextualize,
     FinalizeImmediate, Future, Read, ReferenceContext, Unravel, Write,
@@ -27,7 +28,11 @@ use thiserror::Error;
 
 extern crate self as looking_glass;
 
+#[proc_macro_hack]
+pub use derive::match_any;
+
 pub use derive::typed;
+
 #[doc(hidden)]
 pub use highway;
 
@@ -102,6 +107,28 @@ pub enum DowncastError<T> {
     Extract(#[source] ErasedError),
     #[error("coalesce error: {0}")]
     Coalesce(#[source] T),
+}
+
+#[derive(Debug, Error)]
+pub enum ErasedDowncastError {
+    #[error("incorrect type")]
+    TypeMismatch,
+    #[error("failed to extract erased transport: {0}")]
+    Extract(#[source] ErasedError),
+    #[error("coalesce error: {0}")]
+    Coalesce(#[source] ErasedError),
+}
+
+impl ErasedDowncastError {
+    pub fn erase_downcast_error<T: Error + Send + 'static>(input: DowncastError<T>) -> Self {
+        match input {
+            DowncastError::TypeMismatch => ErasedDowncastError::TypeMismatch,
+            DowncastError::Extract(error) => ErasedDowncastError::Extract(error),
+            DowncastError::Coalesce(error) => {
+                ErasedDowncastError::Coalesce(ErasedError::Erased(Box::new(error)))
+            }
+        }
+    }
 }
 
 impl<T, U> From<DowncastError<T>> for (DowncastError<T>, Option<U>) {
