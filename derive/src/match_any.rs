@@ -78,13 +78,13 @@ pub fn match_any(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let expr = arm.body;
         stream.extend(quote! {
             match looking_glass::ProtocolAny::downcast::<#ty_hint, _>(_gen_item.take().unwrap(), _spawner.clone()).await {
-                Ok(data) => {
-                    if let #pat = data {
-                        if { #guard } {
+                Ok(_temp_data) => {
+                    match _temp_data {
+                        #pat if #guard => {
                             break Ok({ #expr });
                         }
+                        _temp_data => _gen_item = Some(looking_glass::Erase::erase(_temp_data))
                     }
-                    _gen_item = Some(data.erase());
                 }
                 Err((looking_glass::DowncastError::TypeMismatch, data)) => {
                     _gen_item = data;
